@@ -20,3 +20,5 @@ we run out.
 
 The meters are named `com.victronenergy.grid.smappee_XX`, where `XX` is an
 integer.
+
+[smappee]: https://www.smappee.com/
