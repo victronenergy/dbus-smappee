@@ -108,8 +108,8 @@ class Bridge(MqttGObjectBridge):
                     # Fill in the values
                     line = '/Ac/L{}'.format(phase+1)
                     meter.set_path('{}/Current'.format(line), d['current'])
-                    meter.set_path('{}/Energy/Forward'.format(line), d['importEnergy'])
-                    meter.set_path('{}/Energy/Reverse'.format(line), d['exportEnergy'])
+                    meter.set_path('{}/Energy/Forward'.format(line), round(d['importEnergy']/3600000, 1))
+                    meter.set_path('{}/Energy/Reverse'.format(line), round(d['exportEnergy']/3600000, 1))
                     meter.set_path('{}/Power'.format(line), d['power'])
                     meter.set_path('{}/Voltage'.format(line), voltages.get(phase, None))
 
@@ -119,8 +119,8 @@ class Bridge(MqttGObjectBridge):
 
             # Update the totals
             meter.set_path('/Ac/Power', totalpower)
-            meter.set_path('/Ac/Energy/Forward', totalforward)
-            meter.set_path('/Ac/Energy/Reverse', totalreverse)
+            meter.set_path('/Ac/Energy/Forward', round(totalforward/3600000, 1))
+            meter.set_path('/Ac/Energy/Reverse', round(totalreverse/3600000, 1))
 
         for meter in self.meters.itervalues():
             meter.set_path('/FirmwareVersion', data.get('firmwareVersion'))
