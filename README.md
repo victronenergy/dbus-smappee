@@ -14,11 +14,19 @@ Venus to use your [SMAPPEE][smappee] as a grid meter.
 ## How it works
 
 The configuration of the sensors determines how many meters or phases you get.
-The channels published by the smappee are grouped by phase, and then regrouped
-by taking a channel from each phase in turn and making up current meters, until
-we run out.
+The channels published by the smappee are grouped by channelType and phase, and
+then regrouped by taking a channel from each phase in turn and making up
+current meters, until we run out.
 
-The meters are named `com.victronenergy.grid.smappee_XX`, where `XX` is an
-integer.
+Only one meter is allocated from CONSUMPTION channels. This becomes a grid
+meter. The first matching CT (or CTs where more than one phase is
+defined) becomes the grid meter.
+
+All channels of type PRODUCTION are striped across phases and turned into
+current meters. This is done in numeric order.
+
+The grid meter is named `com.victronenergy.grid.smappee_XX`, where `XX` is an
+integer. The other meters (of the PRODUCTION type) are named
+`com.victronenergy.pvinverter.smappee_XX`.
 
 [smappee]: https://www.smappee.com/
