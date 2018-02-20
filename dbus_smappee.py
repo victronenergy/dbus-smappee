@@ -4,7 +4,6 @@ import sys, os
 import json
 import logging
 from itertools import groupby, count, izip_longest, izip
-from collections import defaultdict
 from argparse import ArgumentParser
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext', 'velib_python'))
 
@@ -37,8 +36,9 @@ def dbusconnection():
 class Meter(object):
     """ Represent a meter object on dbus. """
 
-    def __init__(self, host, base, instance):
+    def __init__(self, name, host, base, instance, cts):
         self.instance = instance
+        self.cts = cts
         self.service = service = VeDbusService(
             "{}.smappee_{:02d}".format(base, instance), bus=dbusconnection())
 
@@ -48,7 +48,7 @@ class Meter(object):
         service.add_path('/Management/Connection', host)
         service.add_path('/DeviceInstance', instance)
         service.add_path('/ProductId', 0xFFFF) # 0xB012 ?
-        service.add_path('/ProductName', "SMAPPEE current meter")
+        service.add_path('/ProductName', "Smappee - {}".format(name))
         service.add_path('/FirmwareVersion', None)
         service.add_path('/Serial', None)
         service.add_path('/Connected', 1)
@@ -77,86 +77,125 @@ class Meter(object):
         service.add_path('/Ac/L3/Voltage', None, gettextcallback=_v)
         service.add_path('/Ac/Power', None, gettextcallback=_w)
 
+        # Provide debug info about what cts make up what meter
+        service.add_path('/Debug/Cts', ','.join(str(c) for c in cts))
+
     def set_path(self, path, value):
         if self.service[path] != value:
             self.service[path] = value
 
+    def update(self, voltages, powers):
+        totalpower = totalforward = totalreverse = 0
+        for phase, ct in izip(count(), self.cts):
+            # Fill in the values
+            d = powers[ct]
+            line = '/Ac/L{}'.format(phase+1)
+            self.set_path('{}/Current'.format(line), d['current'])
+            self.set_path('{}/Energy/Forward'.format(line), round(d['importEnergy']/3600000, 1))
+            self.set_path('{}/Energy/Reverse'.format(line), round(d['exportEnergy']/3600000, 1))
+            self.set_path('{}/Power'.format(line), d['power'])
+            self.set_path('{}/Voltage'.format(line), voltages.get(phase, None))
+
+            totalpower += d['power']
+            totalforward += d['importEnergy']
+            totalreverse += d['exportEnergy']
+
+        # Update the totals
+        self.set_path('/Ac/Power', totalpower)
+        self.set_path('/Ac/Energy/Forward', round(totalforward/3600000, 1))
+        self.set_path('/Ac/Energy/Reverse', round(totalreverse/3600000, 1))
+
+    def __repr__(self):
+        return self.__class__.__name__ + "(" + str(self.cts) + ")"
+
+    def __del__(self):
+        self.service.__del__()
+
 class Bridge(MqttGObjectBridge):
-    def __init__(self, meters, *args, **kwargs):
-        super(Bridge, self).__init__(*args, **kwargs)
-        self.meters = meters
+    def __init__(self, base, host, *args, **kwargs):
+        super(Bridge, self).__init__(host, *args, **kwargs)
+        self.base = base
+        self.host = host
+        self.meters = []
+
+    def _allocate_meters(self, name, channels, n, base2, instance_offset):
+        """ Allocates up to n meters from channels, attempting
+            to make three-phase meters. """
+        meters = []
+        phases = {i: [] for i in range(3)}
+        for phase, _channels in groupby(channels, lambda x: x['phase']):
+            phases[phase].extend(_channels)
+
+        spread = izip_longest(phases[0], phases[1], phases[2])
+        for c, phasedata in izip(count(), spread):
+            # stop when we have enough
+            if n is not None and c >= n: break
+
+            # Current sensors that makes up this meter
+            ids = [x['ctInput'] for x in phasedata]
+            meters.append(Meter(name, self.host,
+                '{}.{}'.format(self.base, base2), c+instance_offset, ids))
+
+        return meters
 
     def _on_message(self, client, userdata, msg):
         try:
             data = json.loads(msg.payload)
         except ValueError:
             logger.warning('Malformed payload received')
+            return
 
-        # Voltages
-        voltages = dict((d['phaseId'], d['voltage']) for d in data['voltages'])
+        # Channel config.
+        if msg.topic.endswith('/channelConfig'):
+            # Construct meter objects
+            channels = data['inputChannels']
+            consumption_channels = [c for c in channels \
+                if c['inputChannelType'] == 'CONSUMPTION']
+            production_channels = [c for c in channels \
+                if c['inputChannelType'] == 'PRODUCTION']
 
-        # Simple solution: Assume the channels make up some kind of
-        # 3-phase meter. Group them by phase, sort them by id, then
-        # pair them up into meters.
-        phases = {i: [] for i in range(3)}
-        for phase, channels in groupby(data.get('channelPowers', ()),
-                lambda x: x['phaseId']):
-            phases[phase].extend(sorted(channels))
+            # Use DeviceInstance values from 50 up.
+            self.meters = self._allocate_meters('Consumption',
+                consumption_channels, 1, "grid", 50)
+            self.meters.extend(
+                self._allocate_meters('Production',
+                    production_channels, None, "pvinverter", 51))
 
-        spread = izip_longest(phases[0], phases[1], phases[2])
-        for c, phasedata in izip(count(), spread):
-            meter = self.meters[c]
-            totalpower = totalforward = totalreverse = 0
-            for phase in xrange(3):
-                d = phasedata[phase]
-                if d is not None:
-                    # Fill in the values
-                    line = '/Ac/L{}'.format(phase+1)
-                    meter.set_path('{}/Current'.format(line), d['current'])
-                    meter.set_path('{}/Energy/Forward'.format(line), round(d['importEnergy']/3600000, 1))
-                    meter.set_path('{}/Energy/Reverse'.format(line), round(d['exportEnergy']/3600000, 1))
-                    meter.set_path('{}/Power'.format(line), d['power'])
-                    meter.set_path('{}/Voltage'.format(line), voltages.get(phase, None))
+            return
 
-                    totalpower += d['power']
-                    totalforward += d['importEnergy']
-                    totalreverse += d['exportEnergy']
+        if msg.topic.endswith('/realtime'):
+            # Index the voltage by phase, and the powers by CT. Pass it
+            # to each meter so the meter can pick its values from the
+            # dictionary.
+            voltages = dict((d['phaseId'], d['voltage']) for d in data['voltages'])
+            powers = dict((d['ctInput'], d) for d in data['channelPowers'])
+            for meter in self.meters:
+                meter.update(voltages, powers)
 
-            # Update the totals
-            meter.set_path('/Ac/Power', totalpower)
-            meter.set_path('/Ac/Energy/Forward', round(totalforward/3600000, 1))
-            meter.set_path('/Ac/Energy/Reverse', round(totalreverse/3600000, 1))
-
-        for meter in self.meters.itervalues():
-            meter.set_path('/FirmwareVersion', data.get('firmwareVersion'))
-            meter.set_path('/Serial', data.get('serialNr'))
+            # Update the firmware and serial on each meter
+            for meter in self.meters:
+                meter.set_path('/FirmwareVersion', data.get('firmwareVersion'))
+                meter.set_path('/Serial', data.get('serialNr'))
 
     def _on_connect(self, client, userdata, di, rc):
         self._client.subscribe('servicelocation/+/realtime', 0)
+        self._client.subscribe('servicelocation/+/channelConfig', 0)
 
 def main():
     parser = ArgumentParser(description=sys.argv[0])
     parser.add_argument('--servicebase',
-        help='Base service name on dbus, default is com.victronenergy.grid',
+        help='Base service name on dbus, default is com.victronenergy',
         default='com.victronenergy.grid')
     parser.add_argument('host', help='MQTT Host')
     args = parser.parse_args()
 
     DBusGMainLoop(set_as_default=True)
 
-    # Meters, allocated on demand, device instance is automatically incremented
-    metercount = count()
-    meters = defaultdict(lambda: Meter(args.host, args.servicebase, metercount.next()))
-
     # MQTT connection
-    bridge = Bridge(meters, args.host)
+    bridge = Bridge(args.servicebase, args.host)
 
     mainloop = gobject.MainLoop()
     mainloop.run()
 
 if __name__ == "__main__":
     main()
-
-# TODO
-# subscribe to servicelocation/+/realtime
-# update other fields when these change
