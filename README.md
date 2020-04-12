@@ -1,5 +1,7 @@
 # dbus-smappee
 
+NOTE: this project was never fully completed.
+
 This application reads data published by your [SMAPPEE][smappee] energy monitor
 from MQTT and turns it into a grid meter service on dbus. This allows
 Venus to use your [SMAPPEE][smappee] as a grid meter.
